@@ -717,6 +717,82 @@
             });
         });
     </script>
+
+    <!-- Subscription Section -->
+    <section id="subscription">
+        <div class="container">
+            <div class="section-title">
+                <h2>Get Subscription</h2>
+                <p>Generate your proxy subscription links</p>
+            </div>
+            <div class="card">
+                <p>Backend URL: <input type="text" id="backendUrl" placeholder="自动使用当前服务器" value=""></p>
+                <p><button class="btn" onclick="fetchSubscription()">Generate Subscription</button></p>
+                <p id="subscriptionResult" style="word-break: break-all;"></p>
+            </div>
+            <div class="card" style="margin-top: 1rem;">
+                <p>FlClash Subscription: <button class="btn" onclick="fetchFlClashSubscription()">Get FlClash Config</button></p>
+                <p id="flclashResult" style="word-break: break-all;"></p>
+            </div>
+        </div>
+    </section>
+
+    <script>
+        async function getBackendBase() {
+            const input = document.getElementById('backendUrl').value.trim();
+            if (input) {
+                return input.replace(/\/$/, '');
+            }
+            const origin = window.location.origin || '';
+            return origin;
+        }
+
+        async function fetchSubscription() {
+            const backendUrl = await getBackendBase();
+            const resultEl = document.getElementById('subscriptionResult');
+            
+            if (!backendUrl) {
+                resultEl.innerHTML = '<span style="color: red;">无法获取当前服务器地址</span>';
+                return;
+            }
+            
+            resultEl.innerHTML = 'Loading...';
+            
+            try {
+                const response = await fetch(`${backendUrl}/sub`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const text = await response.text();
+                resultEl.innerHTML = `<span style="color: green;">Success!</span><br><pre>${text}</pre>`;
+            } catch (error) {
+                resultEl.innerHTML = `<span style="color: red;">Error: ${error.message}</span>`;
+            }
+        }
+
+        async function fetchFlClashSubscription() {
+            const backendUrl = await getBackendBase();
+            const resultEl = document.getElementById('flclashResult');
+
+            if (!backendUrl) {
+                resultEl.innerHTML = '<span style="color: red;">无法获取当前服务器地址</span>';
+                return;
+            }
+
+            resultEl.innerHTML = 'Loading...';
+
+            try {
+                const response = await fetch(`${backendUrl}/sub1`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const text = await response.text();
+                resultEl.innerHTML = `<span style="color: green;">Success! FlClash config generated.</span><br><pre style="max-height: 300px; overflow: auto;">${text}</pre>`;
+            } catch (error) {
+                resultEl.innerHTML = `<span style="color: red;">Error: ${error.message}</span>`;
+            }
+        }
+    </script>
 </body>
 
 </html>

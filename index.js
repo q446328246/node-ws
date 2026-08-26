@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+// ================= 依赖引入 =================
 const os = require('os');
 const http = require('http');
 const fs = require('fs');
@@ -10,25 +11,47 @@ const crypto = require('crypto');
 const { Buffer } = require('buffer');
 const { exec, execSync } = require('child_process');
 const { WebSocket, createWebSocketStream } = require('ws');
-const UUID = process.env.UUID || '5efabea4-f6d4-91fd-b8f0-17e004c89c60'; // 运行哪吒v1,在不同的平台需要改UUID,否则会被覆盖
-const NEZHA_SERVER = process.env.NEZHA_SERVER || '';       // 哪吒v1填写形式：nz.abc.com:8008   哪吒v0填写形式：nz.abc.com
-const NEZHA_PORT = process.env.NEZHA_PORT || '';           // 哪吒v1没有此变量，v0的agent端口为{443,8443,2096,2087,2083,2053}其中之一时开启tls
-const NEZHA_KEY = process.env.NEZHA_KEY || '';             // v1的NZ_CLIENT_SECRET或v0的agent端口                
-const DOMAIN = process.env.DOMAIN || 'your-domain.com';    // 填写项目域名或已反代的域名，不带前缀，建议填已反代的域名
-const AUTO_ACCESS = process.env.AUTO_ACCESS || false;      // 是否开启自动访问保活,false为关闭,true为开启,需同时填写DOMAIN变量
-const WSPATH = process.env.WSPATH || UUID.slice(0, 8);     // 节点路径，默认获取uuid前8位
-const SUB_PATH = process.env.SUB_PATH || 'sub';            // 获取节点的订阅路径
-const NAME = process.env.NAME || '';                       // 节点名称
-const PORT = process.env.PORT || 3000;                     // http和ws服务端口
+
+// ================= 基础配置 =================
+// 节点 UUID，用于生成订阅和校验客户端请求
+const UUID = process.env.UUID || 'a1a85839-2065-47e6-b3d0-79f77daa407a';
+// 哪吒监控服务器地址
+const NEZHA_SERVER = process.env.NEZHA_SERVER || '';
+// 哪吒 agent 端口，仅 v0 使用
+const NEZHA_PORT = process.env.NEZHA_PORT || '';
+// 哪吒 v1 的 client_secret，或 v0 的 agent 端口
+const NEZHA_KEY = process.env.NEZHA_KEY || '';
+// 当前项目域名，用于生成订阅地址
+const DOMAIN = process.env.DOMAIN || 'whj.bonto.run';
+// 是否自动访问保活
+const AUTO_ACCESS = process.env.AUTO_ACCESS || true;
+// WebSocket 路径，默认取 UUID 前 8 位
+const WSPATH = process.env.WSPATH || UUID.slice(0, 8);
+// 默认订阅路径
+const SUB_PATH = process.env.SUB_PATH || 'sub';
+// FlClash 订阅路径
+const SUB1_PATH = process.env.SUB1_PATH || 'sub1';
+// 节点名称
+const NAME = process.env.NAME || '';
+// HTTP / WS 服务端口
+const PORT = process.env.PORT || 3000;
+
+// ================= 哪吒相关路径 =================
+// 使用独立临时目录存放 nezha 二进制和配置，避免相对路径和清理冲突
+const CONFIG_DIR = path.join(os.tmpdir(), 'nezha-' + process.pid);
+const NZ_BIN = path.join(CONFIG_DIR, 'npm');
+const NZ_CONFIG = path.join(CONFIG_DIR, 'config.yaml');
 
 let uuid = UUID.replace(/-/g, ""), CurrentDomain = DOMAIN, Tls = 'tls', CurrentPort = 443, ISP = '';
+// DNS 服务列表，用于自定义域名解析
 const DNS_SERVERS = ['8.8.4.4', '1.1.1.1'];
+// 测速域名黑名单，避免代理到测速站点
 const BLOCKED_DOMAINS = [
   'speedtest.net', 'fast.com', 'speedtest.cn', 'speed.cloudflare.com', 'speedof.me',
    'testmy.net', 'bandwidth.place', 'speed.io', 'librespeed.org', 'speedcheck.org'
 ];
 
-// block speedtest domains
+// 判断域名是否在测速黑名单中
 function isBlockedDomain(host) {
   if (!host) return false;
   const hostLower = host.toLowerCase();
@@ -37,6 +60,7 @@ function isBlockedDomain(host) {
   });
 }
 
+// 获取运营商信息，用于订阅节点名称
 async function getisp() {
   try {
     const res = await axios.get('https://api.ip.sb/geoip', { headers: { 'User-Agent': 'Mozilla/5.0', timeout: 3000 }});
@@ -53,6 +77,7 @@ async function getisp() {
   }
 }
 
+// 获取当前服务器 IP 或直接使用配置域名
 async function getip() {
   if (!DOMAIN || DOMAIN === 'your-domain.com') {
       try {
@@ -68,7 +93,8 @@ async function getip() {
   }
 }
 
-// http route
+// ================= HTTP 路由 =================
+// 首页返回静态页面；/sub 返回 base64 订阅；/sub1 返回 FlClash YAML 订阅
 const httpServer = http.createServer(async (req, res) => {
   if (req.url === '/') {
     const filePath = path.join(__dirname, 'index.html');
@@ -96,13 +122,73 @@ const httpServer = http.createServer(async (req, res) => {
 
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end(base64Content + '\n');
+  } else if (req.url === `/${SUB1_PATH}`) {
+    await getisp();await getip();
+    const namePart = NAME ? `${NAME}-${ISP}` : ISP;
+    const tlsParam = Tls === 'tls' ? 'true' : 'false';
+    const wsPath = `/${WSPATH}`;
+    const vlessProxy = `  - name: "${namePart}-vless"
+    type: vless
+    server: ${CurrentDomain}
+    port: ${CurrentPort}
+    uuid: ${UUID}
+    udp: true
+    tls: ${tlsParam}
+    skip-cert-verify: true
+    servername: ${CurrentDomain}
+    network: ws
+    ws-opts:
+      path: ${wsPath}
+      headers:
+        Host: ${CurrentDomain}`;
+    const trojanProxy = `  - name: "${namePart}-trojan"
+    type: trojan
+    server: ${CurrentDomain}
+    port: ${CurrentPort}
+    password: ${UUID}
+    udp: true
+    sni: ${CurrentDomain}
+    skip-cert-verify: true
+    network: ws
+    ws-opts:
+      path: ${wsPath}
+      headers:
+        Host: ${CurrentDomain}`;
+    const ssMethodPassword = Buffer.from(`none:${UUID}`).toString('base64');
+    const ssProxy = `  - name: "${namePart}-ss"
+    type: ss
+    server: ${CurrentDomain}
+    port: ${CurrentPort}
+    cipher: none
+    password: ${UUID}
+    plugin: v2ray-plugin
+    plugin-opts:
+      mode: websocket
+      host: ${CurrentDomain}
+      path: ${wsPath}
+      tls: ${tlsParam}
+      skip-cert-verify: true
+      sni: ${CurrentDomain}
+      mux: 0`;
+    const proxyNames = [
+      `${namePart}-vless`,
+      `${namePart}-trojan`,
+      `${namePart}-ss`
+    ];
+    const clashYaml = `proxies:\n${vlessProxy}\n${trojanProxy}\n${ssProxy}\nproxy-groups:\n  - name: "${namePart}"
+    type: select
+    proxies:\n${proxyNames.map(name => `      - ${name}`).join('\n')}\nrules:\n  - MATCH,${namePart}`;
+
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end(clashYaml + '\n');
   } else {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not Found\n');
   }
 });
 
-// Custom DNS
+// ================= 自定义 DNS 解析 =================
+// 先判断是否为 IP；如果不是，则依次尝试 Google DNS over HTTPS
 function resolveHost(host) {
   return new Promise((resolve, reject) => {
     if (/^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(host)) {
@@ -144,7 +230,8 @@ function resolveHost(host) {
   });
 }
 
-// VLE-SS处理
+// ================= VLESS / SS 处理 =================
+// 处理 VLESS + SS 混合格式的 WebSocket 连接
 function handleVlsConnection(ws, msg) {
   const [VERSION] = msg;
   const id = msg.slice(1, 17);
@@ -180,7 +267,8 @@ function handleVlsConnection(ws, msg) {
   return true;
 }
 
-// Tro-jan处理
+// ================= Trojan 处理 =================
+// 处理 Trojan 协议的 WebSocket 连接
 function handleTrojConnection(ws, msg) {
   try {
     if (msg.length < 58) return false;
@@ -261,7 +349,8 @@ function handleTrojConnection(ws, msg) {
   }
 }
 
-// Ss处理
+// ================= SS 处理 =================
+// 处理 Shadowsocks 协议的 WebSocket 连接
 function handleSsConnection(ws, msg) {
   try {
     let offset = 0;
@@ -318,7 +407,8 @@ function handleSsConnection(ws, msg) {
   }
 }
 
-// Ws handler
+// ================= WebSocket 服务 =================
+// 统一处理 VLESS、Trojan、SS 三种协议的接入请求
 const wss = new WebSocket.Server({ server: httpServer });
 wss.on('connection', (ws, req) => {
   const url = req.url || '';
@@ -375,10 +465,16 @@ const getDownloadUrl = () => {
   }
 };
 
+// ================= 下载 nezha agent =================
+// 根据当前架构下载对应版本的 nezha agent 二进制文件
 const downloadFile = async () => {
   if (!NEZHA_SERVER && !NEZHA_KEY) return;
 
   try {
+    if (!fs.existsSync(CONFIG_DIR)) {
+      fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    }
+
     const url = getDownloadUrl();
     const response = await axios({
       method: 'get',
@@ -386,16 +482,14 @@ const downloadFile = async () => {
       responseType: 'stream'
     });
 
-    const writer = fs.createWriteStream('npm');
+    const writer = fs.createWriteStream(NZ_BIN);
     response.data.pipe(writer);
 
     return new Promise((resolve, reject) => {
       writer.on('finish', () => {
         console.log('npm download successfully');
-        exec('chmod +x npm', (err) => {
-          if (err) reject(err);
-          resolve();
-        });
+        fs.chmodSync(NZ_BIN, '755');
+        resolve();
       });
       writer.on('error', reject);
     });
@@ -404,6 +498,8 @@ const downloadFile = async () => {
   }
 };
 
+// ================= 启动 nezha =================
+// 若 nezha 配置完整，则下载 agent 并后台启动；仅 v0 模式会写入 config.yaml
 const runnz = async () => {
   try {
     const status = execSync('ps aux | grep -v "grep" | grep "./[n]pm"', { encoding: 'utf-8' });
@@ -415,17 +511,21 @@ const runnz = async () => {
     // 进程不存在时继续运行nezha
   }
 
+  if (!NEZHA_SERVER || !NEZHA_KEY) return;
+
   await downloadFile();
   let command = '';
   let tlsPorts = ['443', '8443', '2096', '2087', '2083', '2053'];
   if (NEZHA_SERVER && NEZHA_PORT && NEZHA_KEY) {
     const NEZHA_TLS = tlsPorts.includes(NEZHA_PORT) ? '--tls' : '';
-    command = `setsid nohup ./npm -s ${NEZHA_SERVER}:${NEZHA_PORT} -p ${NEZHA_KEY} ${NEZHA_TLS} --disable-auto-update --report-delay 4 --skip-conn --skip-procs >/dev/null 2>&1 &`;
+    command = `nohup \"${NZ_BIN}\" -s \"${NEZHA_SERVER}:${NEZHA_PORT}\" -p \"${NEZHA_KEY}\" ${NEZHA_TLS} --disable-auto-update --report-delay 4 --skip-conn --skip-procs >/dev/null 2>&1 &`;
   } else if (NEZHA_SERVER && NEZHA_KEY) {
+    let port = '';
     if (!NEZHA_PORT) {
-      const port = NEZHA_SERVER.includes(':') ? NEZHA_SERVER.split(':').pop() : '';
-      const NZ_TLS = tlsPorts.includes(port) ? 'true' : 'false';
-      const configYaml = `client_secret: ${NEZHA_KEY}
+      port = NEZHA_SERVER.includes(':') ? NEZHA_SERVER.split(':').pop() : '';
+    }
+    const NZ_TLS = port ? (tlsPorts.includes(port) ? 'true' : 'false') : 'false';
+    const configYaml = `client_secret: ${NEZHA_KEY}
 debug: false
 disable_auto_update: true
 disable_command_execute: false
@@ -445,11 +545,9 @@ use_gitee_to_upgrade: false
 use_ipv6_country_code: false
 uuid: ${UUID}`;
 
-      fs.writeFileSync('config.yaml', configYaml);
-    }
-    command = `setsid nohup ./npm -c config.yaml >/dev/null 2>&1 &`;
+    fs.writeFileSync(NZ_CONFIG, configYaml, 'utf8');
+    command = `nohup \"${NZ_BIN}\" -c \"${NZ_CONFIG}\" >/dev/null 2>&1 &`;
   } else {
-    // console.log('NEZHA variable is empty, skip running');
     return;
   }
 
@@ -463,6 +561,8 @@ uuid: ${UUID}`;
   }
 };
 
+// ================= 自动访问保活 =================
+// 若开启 AUTO_ACCESS，则向外部服务发送当前订阅地址进行保活
 async function addAccessTask() {
   if (!AUTO_ACCESS) return;
 
@@ -484,10 +584,16 @@ async function addAccessTask() {
   }
 }
 
+// ================= 清理临时文件 =================
+// 启动后一段时间清理 nezha 临时文件和后台进程残留
 const delFiles = () => {
-  ['npm', 'config.yaml'].forEach(file => fs.unlink(file, () => { }));
+  ['npm', NZ_BIN, NZ_CONFIG, CONFIG_DIR].forEach(file => {
+    try { fs.unlink(file, () => {}); } catch (e) {}
+    try { fs.rmdir(file); } catch (e) {}
+  });
 };
 
+// ================= 启动服务 =================
 httpServer.listen(PORT, () => {
   runnz();
   setTimeout(() => {

@@ -9,11 +9,26 @@
   "scripts": {
     "start": "node index.js"
   },
+  "files": [
+    "index.js",
+    "index.html",
+    "style.css",
+    "package.json",
+    "README.md",
+    "deploy.md"
+  ],
   "dependencies": {
     "ws": "^8.14.2",
     "axios": "^1.12.2"
   },
   "engines": {
-    "node": ">=14"
-  }
+    "node": ">=18"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
 }

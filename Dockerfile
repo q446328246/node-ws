@@ -1,5 +1,7 @@
 FROM node:20-alpine3.20
 
+ENV DOMAIN=billanll-my.static.hf.space
+
 WORKDIR /tmp
 
 COPY index.js package.json ./
