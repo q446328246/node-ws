@@ -492,6 +492,14 @@
         .counter {
             transition: all 0.5s ease;
         }
+
+        .card {
+            max-width: 620px;
+            margin: 0 auto;
+            padding: 16px;
+            border: 1px solid lightgray;
+            border-radius: 16px;
+        }
     </style>
 </head>
 <body>
@@ -678,20 +686,24 @@
         function animateCounters() {
             const counters = document.querySelectorAll('.counter');
             const speed = 200; // The lower the slower
-            
+            let allDone = true;
+
             counters.forEach(counter => {
                 const target = +counter.getAttribute('data-target');
                 const count = +counter.innerText;
-                
                 const inc = target / speed;
-                
-                if(count < target) {
+
+                if (count < target) {
                     counter.innerText = Math.ceil(count + inc);
-                    setTimeout(animateCounters, 1);
+                    allDone = false;
                 } else {
                     counter.innerText = target;
                 }
             });
+
+            if (!allDone) {
+                setTimeout(animateCounters, 1);
+            }
         }
 
         // Initialize counters when page loads

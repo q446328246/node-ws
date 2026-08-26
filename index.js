@@ -9,7 +9,7 @@ const net = require('net');
 const path = require('path');
 const crypto = require('crypto');
 const { Buffer } = require('buffer');
-const { exec, execSync } = require('child_process');
+const { exec, execSync, spawn } = require('child_process');
 const { WebSocket, createWebSocketStream } = require('ws');
 
 // ================= 基础配置 =================
@@ -24,7 +24,7 @@ const NEZHA_KEY = process.env.NEZHA_KEY || '';
 // 当前项目域名，用于生成订阅地址
 const DOMAIN = process.env.DOMAIN || 'whj.bonto.run';
 // 是否自动访问保活
-const AUTO_ACCESS = process.env.AUTO_ACCESS || true;
+const AUTO_ACCESS = (process.env.AUTO_ACCESS || 'true').toLowerCase() !== 'false';
 // WebSocket 路径，默认取 UUID 前 8 位
 const WSPATH = process.env.WSPATH || UUID.slice(0, 8);
 // 默认订阅路径
@@ -35,6 +35,8 @@ const SUB1_PATH = process.env.SUB1_PATH || 'sub1';
 const NAME = process.env.NAME || '';
 // HTTP / WS 服务端口
 const PORT = process.env.PORT || 3000;
+// SS 代理密码（必须设置，否则拒绝 SS 连接，避免开放代理）
+const SS_PASSWORD = process.env.SS_PASSWORD || '';
 
 // ================= 哪吒相关路径 =================
 // 使用独立临时目录存放 nezha 二进制和配置，避免相对路径和清理冲突
@@ -44,7 +46,7 @@ const NZ_CONFIG = path.join(CONFIG_DIR, 'config.yaml');
 
 const isWin = process.platform === 'win32';
 
-let uuid = UUID.replace(/-/g, ''), CurrentDomain = DOMAIN, Tls = 'tls', CurrentPort = 443, ISP = '';
+let uuid = UUID.replace(/-/g, '');
 // DNS 服务列表，用于自定义域名解析
 const DNS_SERVERS = ['8.8.4.4', '1.1.1.1'];
 // 测速域名黑名单，避免代理到测速站点
@@ -62,37 +64,62 @@ function isBlockedDomain(host) {
   });
 }
 
-// 获取运营商信息，用于订阅节点名称
+// 获取运营商信息，用于订阅节点名称（返回局部值，不修改全局状态）
 async function getisp() {
   try {
     const res = await axios.get('https://api.ip.sb/geoip', { headers: { 'User-Agent': 'Mozilla/5.0', timeout: 3000 }});
     const data = res.data;
-    ISP = `${data.country_code}-${data.isp}`.replace(/ /g, '_');
+    return `${data.country_code}-${data.isp}`.replace(/ /g, '_');
   } catch (e) {
     try {
       const res2 = await axios.get('http://ip-api.com/json', { headers: { 'User-Agent': 'Mozilla/5.0', timeout: 3000 }});
       const data2 = res2.data;
-      ISP = `${data2.countryCode}-${data2.org}`.replace(/ /g, '_');
+      return `${data2.countryCode}-${data2.org}`.replace(/ /g, '_');
     } catch (e2) {
-      ISP = 'Unknown';
+      return 'Unknown';
     }
   }
 }
 
-// 获取当前服务器 IP 或直接使用配置域名
+// 获取当前服务器 IP 或直接使用配置域名（返回局部值，不修改全局状态）
 async function getip() {
   if (!DOMAIN || DOMAIN === 'your-domain.com') {
       try {
           const res = await axios.get('https://api-ipv4.ip.sb/ip', { timeout: 5000 });
           const ip = res.data.trim();
-          CurrentDomain = ip, Tls = 'none', CurrentPort = PORT;
+          return { domain: ip, tls: 'none', port: PORT };
       } catch (e) {
           console.error('Failed to get IP', e.message);
-          CurrentDomain = 'cahnge-your-domain.com', Tls = 'tls', CurrentPort = 443;
+          return { domain: 'change-your-domain.com', tls: 'tls', port: 443 };
       }
   } else {
-      CurrentDomain = DOMAIN, Tls = 'tls', CurrentPort = 443;
+      return { domain: DOMAIN, tls: 'tls', port: 443 };
   }
+}
+
+// ================= 订阅缓存 =================
+// 缓存 ISP/IP 查询结果，避免每次请求都触发外部网络 I/O
+let subscriptionCache = { isp: null, ip: null, timestamp: 0 };
+const SUBSCRIPTION_CACHE_TTL = 5 * 60 * 1000; // 5 分钟
+
+async function getCachedIsp() {
+  const now = Date.now();
+  if (subscriptionCache.isp && (now - subscriptionCache.timestamp < SUBSCRIPTION_CACHE_TTL)) {
+    return subscriptionCache.isp;
+  }
+  const isp = await getisp();
+  if (isp) subscriptionCache.isp = isp;
+  return isp || subscriptionCache.isp || 'Unknown';
+}
+
+async function getCachedIp() {
+  const now = Date.now();
+  if (subscriptionCache.ip && (now - subscriptionCache.timestamp < SUBSCRIPTION_CACHE_TTL)) {
+    return subscriptionCache.ip;
+  }
+  const ip = await getip();
+  if (ip) subscriptionCache.ip = ip;
+  return ip || subscriptionCache.ip || { domain: 'change-your-domain.com', tls: 'tls', port: 443 };
 }
 
 // ================= HTTP 路由 =================
@@ -111,66 +138,66 @@ const httpServer = http.createServer(async (req, res) => {
     });
     return;
   } else if (req.url === `/${SUB_PATH}`) {
-    await getisp();await getip();
-    const namePart = NAME ? `${NAME}-${ISP}` : ISP;
-    const tlsParam = Tls === 'tls' ? 'tls' : 'none';
-    const ssTlsParam = Tls === 'tls' ? 'tls;' : '';
-    const vlsURL = `vless://${UUID}@${CurrentDomain}:${CurrentPort}?encryption=none&security=${tlsParam}&sni=${CurrentDomain}&fp=chrome&type=ws&host=${CurrentDomain}&path=%2F${WSPATH}#${namePart}`;
-    const troURL = `trojan://${UUID}@${CurrentDomain}:${CurrentPort}?security=${tlsParam}&sni=${CurrentDomain}&fp=chrome&type=ws&host=${CurrentDomain}&path=%2F${WSPATH}#${namePart}`;
+    const [isp, ipResult] = await Promise.all([getCachedIsp(), getCachedIp()]);
+    const namePart = NAME ? `${NAME}-${isp}` : isp;
+    const tlsParam = ipResult.tls === 'tls' ? 'tls' : 'none';
+    const ssTlsParam = ipResult.tls === 'tls' ? 'tls;' : '';
+    const vlsURL = `vless://${UUID}@${ipResult.domain}:${ipResult.port}?encryption=none&security=${tlsParam}&sni=${ipResult.domain}&fp=chrome&type=ws&host=${ipResult.domain}&path=%2F${WSPATH}#${namePart}`;
+    const troURL = `trojan://${UUID}@${ipResult.domain}:${ipResult.port}?security=${tlsParam}&sni=${ipResult.domain}&fp=chrome&type=ws&host=${ipResult.domain}&path=%2F${WSPATH}#${namePart}`;
     const ssMethodPassword = Buffer.from(`none:${UUID}`).toString('base64');
-    const ssURL = `ss://${ssMethodPassword}@${CurrentDomain}:${CurrentPort}?plugin=v2ray-plugin;mode%3Dwebsocket;host%3D${CurrentDomain};path%3D%2F${WSPATH};${ssTlsParam}sni%3D${CurrentDomain};skip-cert-verify%3Dtrue;mux%3D0#${namePart}`;
+    const ssURL = `ss://${ssMethodPassword}@${ipResult.domain}:${ipResult.port}?plugin=v2ray-plugin;mode%3Dwebsocket;host%3D${ipResult.domain};path%3D%2F${WSPATH};${ssTlsParam}sni%3D${ipResult.domain};skip-cert-verify%3Dtrue;mux%3D0#${namePart}`;
     const subscription = vlsURL + '\n' + troURL + '\n' + ssURL;
     const base64Content = Buffer.from(subscription).toString('base64');
 
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end(base64Content + '\n');
   } else if (req.url === `/${SUB1_PATH}`) {
-    await getisp();await getip();
-    const namePart = NAME ? `${NAME}-${ISP}` : ISP;
-    const tlsParam = Tls === 'tls' ? 'true' : 'false';
+    const [isp, ipResult] = await Promise.all([getCachedIsp(), getCachedIp()]);
+    const namePart = NAME ? `${NAME}-${isp}` : isp;
+    const tlsParam = ipResult.tls === 'tls' ? 'true' : 'false';
     const wsPath = `/${WSPATH}`;
     const vlessProxy = `  - name: "${namePart}-vless"
     type: vless
-    server: ${CurrentDomain}
-    port: ${CurrentPort}
+    server: ${ipResult.domain}
+    port: ${ipResult.port}
     uuid: ${UUID}
     udp: true
     tls: ${tlsParam}
     skip-cert-verify: true
-    servername: ${CurrentDomain}
+    servername: ${ipResult.domain}
     network: ws
     ws-opts:
       path: ${wsPath}
       headers:
-        Host: ${CurrentDomain}`;
+        Host: ${ipResult.domain}`;
     const trojanProxy = `  - name: "${namePart}-trojan"
     type: trojan
-    server: ${CurrentDomain}
-    port: ${CurrentPort}
+    server: ${ipResult.domain}
+    port: ${ipResult.port}
     password: ${UUID}
     udp: true
-    sni: ${CurrentDomain}
+    sni: ${ipResult.domain}
     skip-cert-verify: true
     network: ws
     ws-opts:
       path: ${wsPath}
       headers:
-        Host: ${CurrentDomain}`;
+        Host: ${ipResult.domain}`;
     const ssMethodPassword = Buffer.from(`none:${UUID}`).toString('base64');
     const ssProxy = `  - name: "${namePart}-ss"
     type: ss
-    server: ${CurrentDomain}
-    port: ${CurrentPort}
+    server: ${ipResult.domain}
+    port: ${ipResult.port}
     cipher: none
     password: ${UUID}
     plugin: v2ray-plugin
     plugin-opts:
       mode: websocket
-      host: ${CurrentDomain}
+      host: ${ipResult.domain}
       path: ${wsPath}
       tls: ${tlsParam}
       skip-cert-verify: true
-      sni: ${CurrentDomain}
+      sni: ${ipResult.domain}
       mux: 0`;
     const proxyNames = [
       `${namePart}-vless`,
@@ -238,38 +265,71 @@ function resolveHost(host) {
 // ================= VLESS / SS 处理 =================
 // 处理 VLESS + SS 混合格式的 WebSocket 连接
 function handleVlsConnection(ws, msg) {
-  const [VERSION] = msg;
-  const id = msg.slice(1, 17);
-  if (!id.every((v, i) => v == parseInt(uuid.substr(i * 2, 2), 16))) return false;
+  try {
+    if (msg.length < 19) return false;
+    const VERSION = msg[0];
+    const id = msg.slice(1, 17);
+    if (!id.every((v, i) => v == parseInt(uuid.substr(i * 2, 2), 16))) return false;
 
-  let i = msg.slice(17, 18).readUInt8() + 19;
-  const port = msg.slice(i, i += 2).readUInt16BE(0);
-  const ATYP = msg.slice(i, i += 1).readUInt8();
-  const host = ATYP == 1 ? msg.slice(i, i += 4).join('.') :
-    (ATYP == 2 ? new TextDecoder().decode(msg.slice(i + 1, i += 1 + msg.slice(i, i + 1).readUInt8())) :
-      (ATYP == 3 ? msg.slice(i, i += 16).reduce((s, b, i, a) => (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
+    let i = msg.readUInt8(17) + 19;
+    if (i + 2 > msg.length) return false;
+    const port = msg.readUInt16BE(i);
+    i += 2;
+    if (i >= msg.length) return false;
+    const ATYP = msg[i];
+    i += 1;
+    let host;
+    if (ATYP === 0x01) {
+      if (i + 4 > msg.length) return false;
+      host = msg.slice(i, i + 4).join('.');
+      i += 4;
+    } else if (ATYP === 0x02) {
+      if (i >= msg.length) return false;
+      const len = msg.readUInt8(i);
+      i += 1;
+      if (i + len > msg.length) return false;
+      host = new TextDecoder().decode(msg.slice(i, i + len));
+      i += len;
+    } else if (ATYP === 0x03) {
+      if (i + 16 > msg.length) return false;
+      host = msg.slice(i, i + 16).reduce((s, b, idx, a) => (idx % 2 ? s.concat(a.slice(idx - 1, idx + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':');
+      i += 16;
+    } else {
+      return false;
+    }
 
-  if (isBlockedDomain(host)) {
+    if (isBlockedDomain(host)) {
+      ws.close();
+      return false;
+    }
+    ws.send(new Uint8Array([VERSION, 0]));
+    const duplex = createWebSocketStream(ws);
+    const pipeWithLog = (socket) => {
+      duplex.on('error', (err) => console.error('VLESS duplex error:', err))
+             .pipe(socket)
+             .on('error', (err) => console.error('VLESS pipe error:', err))
+             .pipe(duplex);
+    };
+    resolveHost(host)
+      .then(resolvedIP => {
+        net.connect({ host: resolvedIP, port }, function () {
+          this.write(msg.slice(i));
+          pipeWithLog(this);
+        }).on('error', (err) => { console.error('VLESS TCP connect error:', err); ws.close(); });
+      })
+      .catch(error => {
+        net.connect({ host, port }, function () {
+          this.write(msg.slice(i));
+          pipeWithLog(this);
+        }).on('error', (err) => { console.error('VLESS TCP connect error:', err); ws.close(); });
+      });
+
+    return true;
+  } catch (error) {
+    console.error('VLESS handle error:', error);
     ws.close();
     return false;
   }
-  ws.send(new Uint8Array([VERSION, 0]));
-  const duplex = createWebSocketStream(ws);
-  resolveHost(host)
-    .then(resolvedIP => {
-      net.connect({ host: resolvedIP, port }, function () {
-        this.write(msg.slice(i));
-        duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-      }).on('error', () => { });
-    })
-    .catch(error => {
-      net.connect({ host, port }, function () {
-        this.write(msg.slice(i));
-        duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-      }).on('error', () => { });
-    });
-
-  return true;
 }
 
 // ================= Trojan 处理 =================
@@ -292,24 +352,31 @@ function handleTrojConnection(ws, msg) {
     if (!matchedPassword) return false;
     let offset = 56;
     if (msg[offset] === 0x0d && msg[offset + 1] === 0x0a) {
+      if (offset + 2 > msg.length) return false;
       offset += 2;
     }
 
+    if (offset >= msg.length) return false;
     const cmd = msg[offset];
     if (cmd !== 0x01) return false;
     offset += 1;
+    if (offset >= msg.length) return false;
     const atyp = msg[offset];
     offset += 1;
     let host, port;
     if (atyp === 0x01) {
+      if (offset + 4 > msg.length) return false;
       host = msg.slice(offset, offset + 4).join('.');
       offset += 4;
     } else if (atyp === 0x03) {
+      if (offset >= msg.length) return false;
       const hostLen = msg[offset];
       offset += 1;
+      if (offset + hostLen > msg.length) return false;
       host = msg.slice(offset, offset + hostLen).toString();
       offset += hostLen;
     } else if (atyp === 0x04) {
+      if (offset + 16 > msg.length) return false;
       host = msg.slice(offset, offset + 16).reduce((s, b, i, a) =>
         (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), [])
         .map(b => b.readUInt16BE(0).toString(16)).join(':');
@@ -318,10 +385,11 @@ function handleTrojConnection(ws, msg) {
       return false;
     }
 
+    if (offset + 2 > msg.length) return false;
     port = msg.readUInt16BE(offset);
     offset += 2;
 
-    if (offset < msg.length && msg[offset] === 0x0d && msg[offset + 1] === 0x0a) {
+    if (offset + 2 <= msg.length && msg[offset] === 0x0d && msg[offset + 1] === 0x0a) {
       offset += 2;
     }
 
@@ -330,48 +398,67 @@ function handleTrojConnection(ws, msg) {
       return false;
     }
     const duplex = createWebSocketStream(ws);
+    const pipeWithLog = (socket) => {
+      duplex.on('error', (err) => console.error('Trojan duplex error:', err))
+             .pipe(socket)
+             .on('error', (err) => console.error('Trojan pipe error:', err))
+             .pipe(duplex);
+    };
     resolveHost(host)
       .then(resolvedIP => {
         net.connect({ host: resolvedIP, port }, function () {
           if (offset < msg.length) {
             this.write(msg.slice(offset));
           }
-          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-        }).on('error', () => { });
+          pipeWithLog(this);
+        }).on('error', (err) => { console.error('Trojan TCP connect error:', err); ws.close(); });
       })
       .catch(error => {
         net.connect({ host, port }, function () {
           if (offset < msg.length) {
             this.write(msg.slice(offset));
           }
-          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-        }).on('error', () => { });
+          pipeWithLog(this);
+        }).on('error', (err) => { console.error('Trojan TCP connect error:', err); ws.close(); });
       });
 
     return true;
   } catch (error) {
+    console.error('Trojan handle error:', error);
     return false;
   }
 }
 
 // ================= SS 处理 =================
 // 处理 Shadowsocks 协议的 WebSocket 连接
+// 必须设置 SS_PASSWORD 环境变量，否则拒绝所有 SS 连接，避免开放代理
 function handleSsConnection(ws, msg) {
   try {
-    let offset = 0;
+    if (!SS_PASSWORD) return false;
+    const pwdBytes = Buffer.from(SS_PASSWORD, 'utf8');
+    if (msg.length < pwdBytes.length + 1) return false;
+    const providedPwd = msg.slice(0, pwdBytes.length);
+    if (!providedPwd.every((b, i) => b === pwdBytes[i])) return false;
+
+    let offset = pwdBytes.length;
+    if (offset >= msg.length) return false;
     const atyp = msg[offset];
     offset += 1;
 
     let host, port;
     if (atyp === 0x01) {
+      if (offset + 4 > msg.length) return false;
       host = msg.slice(offset, offset + 4).join('.');
       offset += 4;
     } else if (atyp === 0x03) {
+      if (offset >= msg.length) return false;
       const hostLen = msg[offset];
       offset += 1;
+      if (offset + hostLen > msg.length) return false;
       host = msg.slice(offset, offset + hostLen).toString();
       offset += hostLen;
     } else if (atyp === 0x04) {
+      if (offset + 16 > msg.length) return false;
       host = msg.slice(offset, offset + 16).reduce((s, b, i, a) =>
         (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), [])
         .map(b => b.readUInt16BE(0).toString(16)).join(':');
@@ -380,6 +467,7 @@ function handleSsConnection(ws, msg) {
       return false;
     }
 
+    if (offset + 2 > msg.length) return false;
     port = msg.readUInt16BE(offset);
     offset += 2;
 
@@ -388,26 +476,33 @@ function handleSsConnection(ws, msg) {
       return false;
     }
     const duplex = createWebSocketStream(ws);
+    const pipeWithLog = (socket) => {
+      duplex.on('error', (err) => console.error('SS duplex error:', err))
+             .pipe(socket)
+             .on('error', (err) => console.error('SS pipe error:', err))
+             .pipe(duplex);
+    };
     resolveHost(host)
       .then(resolvedIP => {
         net.connect({ host: resolvedIP, port }, function () {
           if (offset < msg.length) {
             this.write(msg.slice(offset));
           }
-          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-        }).on('error', () => { });
+          pipeWithLog(this);
+        }).on('error', (err) => { console.error('SS TCP connect error:', err); ws.close(); });
       })
       .catch(error => {
         net.connect({ host, port }, function () {
           if (offset < msg.length) {
             this.write(msg.slice(offset));
           }
-          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-        }).on('error', () => { });
+          pipeWithLog(this);
+        }).on('error', (err) => { console.error('SS TCP connect error:', err); ws.close(); });
       });
 
     return true;
   } catch (error) {
+    console.error('SS handle error:', error);
     return false;
   }
 }
@@ -450,7 +545,7 @@ wss.on('connection', (ws, req) => {
     }
 
     ws.close();
-  }).on('error', () => { });
+  }).on('error', (err) => { console.error('WebSocket error:', err); });
 });
 
 const getDownloadUrl = () => {
@@ -522,11 +617,14 @@ const runnz = async () => {
   if (!NEZHA_SERVER || !NEZHA_KEY) return;
 
   await downloadFile();
-  let command = '';
   let tlsPorts = ['443', '8443', '2096', '2087', '2083', '2053'];
+  let child;
   if (NEZHA_SERVER && NEZHA_PORT && NEZHA_KEY) {
     const NEZHA_TLS = tlsPorts.includes(NEZHA_PORT) ? '--tls' : '';
-    command = `nohup \"${NZ_BIN}\" -s \"${NEZHA_SERVER}:${NEZHA_PORT}\" -p \"${NEZHA_KEY}\" ${NEZHA_TLS} --disable-auto-update --report-delay 4 --skip-conn --skip-procs >/dev/null 2>&1 &`;
+    const args = ['-s', `${NEZHA_SERVER}:${NEZHA_PORT}`, '-p', NEZHA_KEY];
+    if (NEZHA_TLS) args.push('--tls');
+    args.push('--disable-auto-update', '--report-delay', '4', '--skip-conn', '--skip-procs');
+    child = spawn(NZ_BIN, args, { detached: true, stdio: 'ignore', windowsHide: true });
   } else if (NEZHA_SERVER && NEZHA_KEY) {
     let port = '';
     if (!NEZHA_PORT) {
@@ -554,23 +652,21 @@ use_ipv6_country_code: false
 uuid: ${UUID}`;
 
     fs.writeFileSync(NZ_CONFIG, configYaml, 'utf8');
-    command = `nohup \"${NZ_BIN}\" -c \"${NZ_CONFIG}\" >/dev/null 2>&1 &`;
+    child = spawn(NZ_BIN, ['-c', NZ_CONFIG], { detached: true, stdio: 'ignore', windowsHide: true });
   } else {
     return;
   }
 
-  try {
-    if (isWin) {
-      console.log('Skip nezha agent on Windows');
-      return;
+  if (!child) return;
+
+  child.unref();
+  child.on('error', (err) => console.error('nezha spawn error:', err));
+  child.on('exit', (code, signal) => {
+    if (code !== null && code !== 0) {
+      console.error(`nezha exited with code ${code} signal ${signal}`);
     }
-    exec(command, { shell: '/bin/bash' }, (err) => {
-      if (err) console.error('npm running error:', err);
-      else console.log('npm is running');
-    });
-  } catch (error) {
-    console.error(`error: ${error}`);
-  }
+  });
+  console.log('nezha is running');
 };
 
 // ================= 自动访问保活 =================
@@ -599,15 +695,10 @@ async function addAccessTask() {
 // ================= 清理临时文件 =================
 // 启动后一段时间清理 nezha 临时文件和后台进程残留
 const delFiles = () => {
-  ['npm', NZ_BIN, NZ_CONFIG, CONFIG_DIR].forEach(file => {
+  [NZ_BIN, NZ_CONFIG].forEach(file => {
     try {
       if (fs.existsSync(file)) {
-        const stat = fs.statSync(file);
-        if (stat.isFile() || stat.isSymbolicLink()) {
-          fs.unlinkSync(file);
-        } else if (stat.isDirectory()) {
-          fs.rmSync(file, { recursive: true, force: true });
-        }
+        fs.unlinkSync(file);
       }
     } catch (e) {}
   });

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 const http = require('http');
-const { execSync } = require('child_process');
+const { execSync, fork } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -38,12 +38,13 @@ function request(urlPath, timeoutMs = 4000) {
 }
 
 async function diagnostics() {
-  // Start server in background
-  const server = require(path.join(root, 'index.js'));
-  
-  // Wait for server to be ready
+  const child = fork(path.join(root, 'index.js'), [], {
+    silent: false,
+    env: { ...process.env, PORT: String(PORT) }
+  });
+
   await new Promise(r => setTimeout(r, 1500));
-  
+
   console.log('\n--- endpoints ---');
   const endpoints = [
     { path: '/', expect: 'Green Network' },
@@ -51,7 +52,7 @@ async function diagnostics() {
     { path: '/sub', expect: 'vless://' },
     { path: '/sub1', expect: 'proxies:' }
   ];
-  
+
   for (const ep of endpoints) {
     try {
       const res = await request(ep.path);
@@ -61,8 +62,18 @@ async function diagnostics() {
       console.log(ep.path + ' error=' + e.message);
     }
   }
-  
-  console.log('\nDiagnostics complete.');
+
+  console.log('\nDiagnostics complete. Shutting down server...');
+  child.kill('SIGTERM');
+
+  await new Promise(resolve => {
+    const timer = setTimeout(resolve, 2000);
+    child.on('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+
   process.exit(0);
 }
 
