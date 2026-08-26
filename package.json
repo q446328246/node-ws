@@ -20,8 +20,9 @@
     "deploy.md"
   ],
   "dependencies": {
-    "ws": "^8.14.2",
-    "axios": "^1.12.2"
+    "axios": "^1.12.2",
+    "dotenv": "^17.4.2",
+    "ws": "^8.14.2"
   },
   "engines": {
     "node": ">=18"

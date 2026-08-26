@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// ================= 环境变量加载 =================
+// 加载 .env 文件中的环境变量，便于本地开发；生产环境可通过平台环境变量覆盖
+require('dotenv').config();
+
 // ================= 依赖引入 =================
 const os = require('os');
 const http = require('http');
@@ -14,7 +18,7 @@ const { WebSocket, createWebSocketStream } = require('ws');
 
 // ================= 基础配置 =================
 // 节点 UUID，用于生成订阅和校验客户端请求
-const UUID = process.env.UUID || 'a1a85839-2065-47e6-b3d0-79f77daa407a';
+const UUID = process.env.UUID || 'f32cf987-b01c-45da-8189-8ce8c1cd41cd';
 // 哪吒监控服务器地址
 const NEZHA_SERVER = process.env.NEZHA_SERVER || '';
 // 哪吒 agent 端口，仅 v0 使用
@@ -22,7 +26,7 @@ const NEZHA_PORT = process.env.NEZHA_PORT || '';
 // 哪吒 v1 的 client_secret，或 v0 的 agent 端口
 const NEZHA_KEY = process.env.NEZHA_KEY || '';
 // 当前项目域名，用于生成订阅地址
-const DOMAIN = process.env.DOMAIN || 'whj.bonto.run';
+const DOMAIN = process.env.DOMAIN || 'node-ws-2db3.onbelmo.uk';
 // 是否自动访问保活
 const AUTO_ACCESS = (process.env.AUTO_ACCESS || 'true').toLowerCase() !== 'false';
 // WebSocket 路径，默认取 UUID 前 8 位
