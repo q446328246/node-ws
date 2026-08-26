@@ -183,6 +183,9 @@ const httpServer = http.createServer(async (req, res) => {
 
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end(clashYaml + '\n');
+  } else if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('ok\n');
   } else {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not Found\n');
