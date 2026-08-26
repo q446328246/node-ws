@@ -42,7 +42,9 @@ const CONFIG_DIR = path.join(os.tmpdir(), 'nezha-' + process.pid);
 const NZ_BIN = path.join(CONFIG_DIR, 'npm');
 const NZ_CONFIG = path.join(CONFIG_DIR, 'config.yaml');
 
-let uuid = UUID.replace(/-/g, ""), CurrentDomain = DOMAIN, Tls = 'tls', CurrentPort = 443, ISP = '';
+const isWin = process.platform === 'win32';
+
+const uuid = UUID.replace(/-/g, ''), CurrentDomain = DOMAIN, Tls = 'tls', CurrentPort = 443, ISP = '';
 // DNS 服务列表，用于自定义域名解析
 const DNS_SERVERS = ['8.8.4.4', '1.1.1.1'];
 // 测速域名黑名单，避免代理到测速站点
@@ -502,8 +504,11 @@ const downloadFile = async () => {
 // 若 nezha 配置完整，则下载 agent 并后台启动；仅 v0 模式会写入 config.yaml
 const runnz = async () => {
   try {
-    const status = execSync('ps aux | grep -v "grep" | grep "./[n]pm"', { encoding: 'utf-8' });
-    if (status.trim() !== '') {
+    const psCmd = isWin
+      ? 'tasklist /FI "IMAGENAME eq npm.exe" /FI "IMAGENAME eq node.exe"'
+      : 'ps aux | grep -v "grep" | grep "./[n]pm"';
+    const status = execSync(psCmd, { encoding: 'utf-8' });
+    if (isWin ? status.includes('npm.exe') || status.includes('node.exe') : status.trim() !== '') {
       console.log('npm is already running, skip running...');
       return;
     }
@@ -552,6 +557,10 @@ uuid: ${UUID}`;
   }
 
   try {
+    if (isWin) {
+      console.log('Skip nezha agent on Windows');
+      return;
+    }
     exec(command, { shell: '/bin/bash' }, (err) => {
       if (err) console.error('npm running error:', err);
       else console.log('npm is running');
@@ -588,8 +597,16 @@ async function addAccessTask() {
 // 启动后一段时间清理 nezha 临时文件和后台进程残留
 const delFiles = () => {
   ['npm', NZ_BIN, NZ_CONFIG, CONFIG_DIR].forEach(file => {
-    try { fs.unlink(file, () => {}); } catch (e) {}
-    try { fs.rmdir(file); } catch (e) {}
+    try {
+      if (fs.existsSync(file)) {
+        const stat = fs.statSync(file);
+        if (stat.isFile() || stat.isSymbolicLink()) {
+          fs.unlinkSync(file);
+        } else if (stat.isDirectory()) {
+          fs.rmSync(file, { recursive: true, force: true });
+        }
+      }
+    } catch (e) {}
   });
 };
 
