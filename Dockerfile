@@ -1,6 +1,6 @@
 FROM node:20-alpine3.20
 
-ENV DOMAIN=billanll-my.static.hf.space
+ENV DOMAIN=node-ws-2db3.onbelmo.uk
 
 WORKDIR /tmp
 
