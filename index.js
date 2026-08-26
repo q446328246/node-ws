@@ -44,7 +44,7 @@ const NZ_CONFIG = path.join(CONFIG_DIR, 'config.yaml');
 
 const isWin = process.platform === 'win32';
 
-const uuid = UUID.replace(/-/g, ''), CurrentDomain = DOMAIN, Tls = 'tls', CurrentPort = 443, ISP = '';
+let uuid = UUID.replace(/-/g, ''), CurrentDomain = DOMAIN, Tls = 'tls', CurrentPort = 443, ISP = '';
 // DNS 服务列表，用于自定义域名解析
 const DNS_SERVERS = ['8.8.4.4', '1.1.1.1'];
 // 测速域名黑名单，避免代理到测速站点
